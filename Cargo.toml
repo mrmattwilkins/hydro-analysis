@@ -2,6 +2,15 @@
 name = "hydro-analysis"
 version = "0.0.1"
 edition = "2024"
+authors = ["Matt Wilkins (https://github.com/mrmattwilkins)"]
+license = "MIT"
+description = "Hydrolog anaylsis tools for manipulating DEMs"
+readme = "README.md"
+repository = "https://github.com/mrmattwilkins/hydro-analysis"
+homepage = "https://github.com/mrmattwilkins/hydro-analysis"
+documentation = "https://docs.rs/hydro-analysis"
+keywords = ["hydrology", "DEM"]
+categories = ["science::geo"]
 
 [profile.release]
 opt-level = 3

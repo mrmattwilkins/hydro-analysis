@@ -1,3 +1,27 @@
+//! # Hydro-analysis
+//!
+//! `hydro-analysis` provides functions for Hydrology DEM manipulation that are based on
+//! [whitebox](https://github.com/jblindsay/whitebox-tools).  Whitebox is a command line tool, this
+//! crate provides some (only a couple functions at present) of that functionality via functions so
+//! can be called from your code.
+//!
+//! ## Example
+//!
+//! ```
+//! use ndarray::Array2;
+//! use hydro_analysis::fill_depressions;
+//!
+//! let mut dem = Array2::from_shape_vec(
+//!     (3, 3),
+//!     vec![
+//!         10.0, 12.0, 10.0,
+//!         12.0, 9.0,  12.0,
+//!         10.0, 12.0, 10.0,
+//!     ],
+//! ).expect("Failed to create DEM");
+//!
+//! fill_depressions(&mut dem, -3.0, 8.0, 8.0, true);
+//! ```
 use rayon::prelude::*;
 use std::collections::{BinaryHeap, VecDeque};
 use std::cmp::Ordering;
@@ -49,8 +73,40 @@ impl Ord for GridCell2 {
 }
 
 
-/// Fill depressions in DEM.  More-or-less the contents of
-/// (whitebox)[https://github.com/jblindsay/whitebox-tools/blob/master/whitebox-tools-app/src/tools/hydro_analysis/fill_depressions.rs]
+/// Fills depressions (sinks) in a digital elevation model (DEM).
+///
+/// More-or-less the contents of
+/// [whitebox fill_depressions](https://github.com/jblindsay/whitebox-tools/blob/master/whitebox-tools-app/src/tools/hydro_analysis/fill_depressions.rs)
+///
+/// This function modifies the input `dem` to ensure that all depressions (local minima that do not
+/// drain) are removed, making the surface hydrologically correct. It also considers no-data values
+/// and can optionally fix flat areas.
+///
+/// # Parameters
+///
+/// - `dem`: A mutable reference to a 2D array (`Array2<f64>`) representing the elevation data.
+/// - `nodata`: The value representing no-data cells in the DEM.
+/// - `resx`: The horizontal resolution (grid spacing in the x-direction).
+/// - `resy`: The vertical resolution (grid spacing in the y-direction).
+/// - `fix_flats`: A boolean flag to determine whether flat areas should be slightly sloped.
+///
+/// # Example
+///
+/// ```
+/// use ndarray::Array2;
+/// use hydro_analysis::fill_depressions;
+///
+/// let mut dem = Array2::from_shape_vec(
+///     (3, 3),
+///     vec![
+///         10.0, 12.0, 10.0,
+///         12.0, 9.0,  12.0,
+///         10.0, 12.0, 10.0,
+///     ],
+/// ).expect("Failed to create DEM");
+///
+/// fill_depressions(&mut dem, -3.0, 8.0, 8.0, true);
+/// ```
 pub fn fill_depressions(
     dem: &mut Array2<f64>, nodata: f64, resx: f64, resy: f64, fix_flats: bool
 )
