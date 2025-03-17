@@ -1,6 +1,11 @@
 [package]
 name = "hydro-analysis"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2024"
 
+[profile.release]
+opt-level = 3
+
 [dependencies]
+rayon = "1.10"
+ndarray = "0.15.6"
