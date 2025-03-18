@@ -399,7 +399,10 @@ pub fn fill_depressions(
 }
 
 /// Calculates the D8 flow direction from a digital elevation model (DEM).
-/// 
+///
+/// More-or-less the contents of
+/// [whitebox d8_pointer](https://github.com/jblindsay/whitebox-tools/blob/master/whitebox-tools-app/src/tools/hydro_analysis/d8_pointer.rs)
+///
 /// This function computes the D8 flow direction for each cell in the provided DEM:
 ///                                                                                                          
 /// | .  |  .  |  . |                                                                                        
