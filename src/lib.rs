@@ -9,7 +9,7 @@
 //!
 //! ```
 //! use ndarray::Array2;
-//! use hydro_analysis::fill_depressions;
+//! use hydro_analysis::{fill_depressions, d8_pointer};
 //!
 //! let mut dem = Array2::from_shape_vec(
 //!     (3, 3),
