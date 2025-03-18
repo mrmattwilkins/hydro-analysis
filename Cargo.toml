@@ -1,6 +1,6 @@
 [package]
 name = "hydro-analysis"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2024"
 authors = ["Matt Wilkins (https://github.com/mrmattwilkins)"]
 license = "MIT"
@@ -17,4 +17,4 @@ opt-level = 3
 
 [dependencies]
 rayon = "1.10"
-ndarray = "0.15.6"
+ndarray = { version = "0.15.6", features = ["rayon"] }

@@ -9,7 +9,7 @@ can be called from your code.
 
 ```
 use ndarray::Array2;
-use hydro_analysis::fill_depressions;
+use hydro_analysis::{fill_depressions, d8_pointer};
 
 let mut dem = Array2::from_shape_vec(
     (3, 3),
@@ -21,4 +21,5 @@ let mut dem = Array2::from_shape_vec(
 ).expect("Failed to create DEM");
 
 fill_depressions(&mut dem, -3.0, 8.0, 8.0, true);
+let (d8, d8_nd) = d8_pointer(&dem, -1.0, 8.0, 8.0);
 ```

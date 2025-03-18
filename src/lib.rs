@@ -21,12 +21,14 @@
 //! ).expect("Failed to create DEM");
 //!
 //! fill_depressions(&mut dem, -3.0, 8.0, 8.0, true);
+//! let (d8, d8_nd) = d8_pointer(&dem, -1.0, 8.0, 8.0);
 //! ```
 use rayon::prelude::*;
 use std::collections::{BinaryHeap, VecDeque};
 use std::cmp::Ordering;
 use std::cmp::Ordering::Equal;
 use ndarray::Array2;
+
 
 
 #[derive(PartialEq, Debug)]
@@ -396,5 +398,98 @@ pub fn fill_depressions(
     }
 }
 
+/// Calculates the D8 flow direction from a digital elevation model (DEM).
+/// 
+/// This function computes the D8 flow direction for each cell in the provided DEM:
+///                                                                                                          
+/// | .  |  .  |  . |                                                                                        
+/// |:--:|:---:|:--:|                                                                                        
+/// | 64 | 128 | 1  |                                                                                        
+/// | 32 |  0  | 2  |                                                                                        
+/// | 16 |  8  | 4  |                                                                                        
+///
+/// Grid cells that have no lower neighbours are assigned a flow direction of zero. In a DEM that
+/// has been pre-processed to remove all depressions and flat areas, this condition will only occur
+/// along the edges of the grid.
+///                                                                                                                                                                                                                  
+/// Grid cells possessing the NoData value in the input DEM are assigned the NoData value in the
+/// output image.                                                                                                       
+///
+/// # Parameters
+/// - `dem`: A 2D array representing the digital elevation model (DEM)
+/// - `nodata`: The nodata in the DEM
+/// - `resx`: The resolution of the DEM in the x-direction in meters
+/// - `resy`: The resolution of the DEM in the y-direction in meters
+///
+/// # Returns
+/// - A tuple containing:
+///     - An `Array2<u8>` representing the D8 flow directions for each cell.
+///     - A `u8` nodata value (255)
+///
+/// # Example
+/// ```rust
+/// let dem = Array2::from_shape_vec(
+///     (3, 3),
+///     vec![
+///         10.0, 12.0, 10.0,
+///         12.0, 13.0, 12.0,
+///         10.0, 12.0, 10.0,
+///     ],
+/// ).expect("Failed to create DEM");
+/// let nodata = -9999.0;
+/// let resx = 8.0;
+/// let resy = 8.0;
+/// let (d8, nd) = d8_pointer(&dem, nodata, resx, resy);
+/// ```
+pub fn d8_pointer(dem: &Array2<f64>, nodata: f64, resx: f64, resy: f64) -> (Array2<u8>, u8)
+{
+    let (nrows, ncols) = (dem.nrows(), dem.ncols());
+    let out_nodata: u8 = 255;
+    let mut d8: Array2<u8> = Array2::from_elem((nrows, ncols), out_nodata);
+
+    let diag = (resx * resx + resy * resy).sqrt();
+    let grid_lengths = [diag, resx, diag, resy, diag, resx, diag, resy];
+
+    let dx = [1, 1, 1, 0, -1, -1, -1, 0];
+    let dy = [-1, 0, 1, 1, 1, 0, -1, -1];
+
+    d8.axis_iter_mut(ndarray::Axis(0))
+        .into_par_iter()
+        .enumerate()
+        .for_each(|(row, mut d8_row)| {
+            for col in 0..ncols {
+                let z = dem[[row, col]];
+                if z == nodata {
+                    continue;
+                }
+
+                let mut dir = 0;
+                let mut max_slope = f64::MIN;
+                for i in 0..8 {
+                    let rn: isize = row as isize + dy[i];
+                    let cn: isize = col as isize + dx[i];
+                    if rn < 0 || rn >= nrows as isize || cn < 0 || cn >= ncols as isize {
+                        continue;
+                    }
+                    let z_n = dem[[rn as usize, cn as usize]];
+                    if z_n != nodata {
+                        let slope = (z - z_n) / grid_lengths[i];
+                        if slope > max_slope && slope > 0.0 {
+                            max_slope = slope;
+                            dir = i;
+                        }
+                    }
+                }
+
+                if max_slope >= 0.0 {
+                    d8_row[col] = 1 << dir;
+                } else {
+                    d8_row[col] = 0u8;
+                }
+            }
+        });
+
+    return (d8, out_nodata);
+}
 
 
