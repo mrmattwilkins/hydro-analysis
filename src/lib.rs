@@ -1,11 +1,26 @@
 //! # Hydro-analysis
 //!
-//! `hydro-analysis` provides functions for Hydrology DEM manipulation that are based on
-//! [whitebox](https://github.com/jblindsay/whitebox-tools).  Whitebox is a command line tool, this
-//! crate provides some (only a couple functions at present) of that functionality via functions so
-//! can be called from your code.
+//! `hydro-analysis` provides functions for Hydrology DEM manipulation.  There are
+//! a couple generic functions for reading/writing raster files of any common
+//! primative type (which surprizingly I couldn't find anywhere else, unless you
+//! use GDAL which I am trying to avoid).  Also there are a couple functions based
+//! on [whitebox](https://github.com/jblindsay/whitebox-tools).  Whitebox is a
+//! command line tool, this provides functionality via functions so can be called
+//! from your code.
 //!
-//! ## Example
+//! ## Example of reading and writing rasters                                                         
+//!                                                                                                   
+//! ```                                                                                               
+//! let ifn = PathBuf::from("input.tif");                                                             
+//! let (d8, nd, crs, geo, gdir, proj) = rasterfile_to_array::<u8>(&ifn)?;                            
+//! /* do something with d8, or make a new array2 */                                                  
+//! let ofn = PathBuf::from("output.tif");                                                            
+//! if let Err(e) = array_to_rasterfile::<u8>(&d8, nd, &geo, &gdir, &proj, &ofn) {                    
+//!     eprintln!("Error occured while writing {}: {:?}", ofn.display(), e);                          
+//! }                                                                                                 
+//! ```                                                                                               
+//!                                                                                                   
+//! ## Example of filling and d8                                                                      
 //!
 //! ```
 //! use ndarray::Array2;
@@ -23,12 +38,216 @@
 //! fill_depressions(&mut dem, -3.0, 8.0, 8.0, true);
 //! let (d8, d8_nd) = d8_pointer(&dem, -1.0, 8.0, 8.0);
 //! ```
+
 use rayon::prelude::*;
 use std::collections::{BinaryHeap, VecDeque};
 use std::cmp::Ordering;
 use std::cmp::Ordering::Equal;
 use ndarray::Array2;
 
+use std::{fs::File, f64, path::PathBuf};
+use thiserror::Error;
+use bytemuck::cast_slice;
+
+use tiff::decoder::DecodingResult;
+use tiff::encoder::compression::Deflate;
+use tiff::encoder::colortype::{Gray8,Gray16,Gray32,Gray64,Gray32Float,Gray64Float,GrayI8,GrayI16,GrayI32,GrayI64};
+use tiff::tags::Tag;
+use tiff::TiffFormatError;
+
+
+#[derive(Debug, Error)]
+pub enum RasterError {
+    #[error("TIFF error: {0}")]
+    Tiff(#[from] tiff::TiffError),
+
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("NDarray: {0}")]
+    Shape(#[from] ndarray::ShapeError),
+
+    #[error("Failed to parse nodata value")]
+    ParseIntError(#[from] std::num::ParseIntError),
+
+    #[error("Failed to parse nodata value")]
+    ParseFloatError(#[from] std::num::ParseFloatError),
+
+    #[error("Unsupported type: {0}")]
+    UnsupportedType(String)
+}
+
+/// Reads a single-band grayscale GeoTIFF raster file returning ndarry2 and metadata
+///
+/// # Type Parameters
+/// - `T`: The pixel value type.  u8, u16, i16, f64 etc
+///
+/// # Parameters
+/// - `fname`: Path to the input `.tif` GeoTIFF file.
+///
+/// # Returns
+/// A `Result` with a tuple containing:
+///     - `Array2<T>`: The raster data in a 2D array.
+///     - `T`: nodata
+///     - `u16`: CRS (e.g. 2193)
+///     - `[f64; 6]`: The affine GeoTransform in the format:
+///         `[origin_x, pixel_size_x, rotation_x, origin_y, rotation_y, pixel_size_y]`.
+///     - `Vec<u64>`: raw GeoKeyDirectoryTag values (needed for writing to file)
+///     - `String`: PROJ string (needed for writing to file)
+///
+/// # Errors
+///     - Returns `RasterError` variants if reading fails, the type conversion for data or metadata
+///       fails, or required tags are missing from the TIFF file.
+///
+/// # Example
+/// ```
+/// let path = PathBuf::from("input.tif");
+/// let (d8, nd, crs, geo, gdir, proj) = rasterfile_to_array::<u8>(&path)?;
+/// ```
+pub fn rasterfile_to_array<T>(fname: &PathBuf) -> Result<
+    (
+        Array2<T>,
+        T,          // nodata
+        u16,        // crs
+        [f64; 6],   // geo transform [start_x, psize_x, rotation, starty, rotation, psize_y]
+        Vec<u64>,   // geo dir, it has the crs in it
+        String      // the projection string
+    ),
+    RasterError
+>
+    where T: std::str::FromStr + num::FromPrimitive,
+          <T as std::str::FromStr>::Err: std::fmt::Debug,
+          RasterError: std::convert::From<<T as std::str::FromStr>::Err>
+{
+    // Open the file
+    let file = File::open(fname)?;
+
+    // Create a TIFF decoder
+    let mut decoder = tiff::decoder::Decoder::new(file)?;
+    decoder = decoder.with_limits(tiff::decoder::Limits::unlimited());
+
+    // Read the image dimensions
+    let (width, height) = decoder.dimensions()?;
+
+    fn estr<T>(etype: &'static str) -> RasterError {
+        RasterError::Tiff(TiffFormatError::Format(format!("Raster is {}, I was expecting {}", etype, std::any::type_name::<T>()).into()).into())
+    }
+    let data: Vec<T> = match decoder.read_image()? {
+        DecodingResult::I8(buf)  => buf.into_iter().map(|v| <T>::from_i8(v).ok_or(estr::<T>("I8"))).collect::<Result<_, _>>(),
+        DecodingResult::I16(buf) => buf.into_iter().map(|v| <T>::from_i16(v).ok_or(estr::<T>("I16"))).collect::<Result<_, _>>(),
+        DecodingResult::I32(buf) => buf.into_iter().map(|v| <T>::from_i32(v).ok_or(estr::<T>("I32"))).collect::<Result<_, _>>(),
+        DecodingResult::I64(buf) => buf.into_iter().map(|v| <T>::from_i64(v).ok_or(estr::<T>("I64"))).collect::<Result<_, _>>(),
+        DecodingResult::U8(buf)  => buf.into_iter().map(|v| <T>::from_u8(v).ok_or(estr::<T>("U8"))).collect::<Result<_, _>>(),
+        DecodingResult::U16(buf) => buf.into_iter().map(|v| <T>::from_u16(v).ok_or(estr::<T>("U16"))).collect::<Result<_, _>>(),
+        DecodingResult::U32(buf) => buf.into_iter().map(|v| <T>::from_u32(v).ok_or(estr::<T>("U32"))).collect::<Result<_, _>>(),
+        DecodingResult::U64(buf) => buf.into_iter().map(|v| <T>::from_u64(v).ok_or(estr::<T>("U64"))).collect::<Result<_, _>>(),
+        DecodingResult::F32(buf) => buf.into_iter().map(|v| <T>::from_f32(v).ok_or(estr::<T>("F32"))).collect::<Result<_, _>>(),
+        DecodingResult::F64(buf) => buf.into_iter().map(|v| <T>::from_f64(v).ok_or(estr::<T>("F64"))).collect::<Result<_, _>>(),
+    }?;
+
+    // Convert the flat vector into an ndarray::Array2
+    let array: Array2<T> = Array2::from_shape_vec((height as usize, width as usize), data)?;
+
+    // nodata value
+    let nodata: T = decoder.get_tag_ascii_string(Tag::GdalNodata)?.trim().parse::<T>()?;
+
+    // pixel scale [pixel scale x, pixel scale y, ...]
+    let pscale: Vec<f64> = decoder.get_tag_f64_vec(Tag::ModelPixelScaleTag)?.into_iter().collect();
+
+    // tie point [0 0 0 startx starty 0]
+    let tie: Vec<f64>  = decoder.get_tag_f64_vec(Tag::ModelTiepointTag)?.into_iter().collect();
+
+    // transform, the zeros are the rotations [start x, x pixel size, 0, start y, 0, y pixel size]
+    let geotrans: [f64; 6] = [tie[3], pscale[0], 0.0, tie[4], 0.0, -pscale[1]];
+
+    let projection: String = decoder.get_tag_ascii_string(Tag::GeoAsciiParamsTag)?;
+    let geokeydir: Vec<u64> = decoder .get_tag_u64_vec(Tag::GeoKeyDirectoryTag)?;
+
+    // try and get the CRS out of the geokeydir, it is the bit after 3072
+    let crs = geokeydir.windows(4).find(|w| w[0] == 3072).map(|w| w[3])
+        .ok_or(RasterError::Tiff(tiff::TiffFormatError::InvalidTagValueType(Tag::GeoKeyDirectoryTag).into()))? as u16;
+
+    Ok((array, nodata, crs, geotrans, geokeydir, projection))
+}
+
+/// Writes a 2D array of values to a GeoTIFF raster with geo metadata.
+///
+/// # Type Parameters
+/// - `T`: The element type of the array, which must implement `bytemuck::Pod`
+/// (for safe byte casting) and `ToString` (for writing NoData values to
+/// metadata).
+///
+/// # Parameters
+/// 	- `data`: A 2D array (`ndarray::Array2<T>`) containing raster pixel values.
+/// 	- `nd`: NoData value
+/// 	- `geotrans`: A 6-element array defining the affine geotransform:
+/// 	    `[origin_x, pixel_size_x, rotation_x, origin_y, rotation_y, pixel_size_y]`.
+/// 	- `geokeydir`: &[u64] the GeoKeyDirectoryTag (best got from reading a raster)
+/// 	- `proj`: PROJ string (best got from reading a raster)
+/// 	- `outfile`: The path to the output `.tif` file.
+///
+/// # Returns
+/// Ok() or a `RasterError`
+///
+/// # Errors
+/// - Returns `RasterError::UnsupportedType` if `T` can't be mapped to a TIFF format.
+/// - Propagates I/O and TIFF writing errors
+///
+/// # Example
+/// ```
+/// let path = PathBuf::from("input.tif");
+/// let (d8, nd, crs, geo, gdir, proj) = rasterfile_to_array::<u8>(&path)?;
+/// /* do something with d8, or make a new array2 */
+/// let out = PathBuf::from("output.tif");
+/// if let Err(e) = array_to_rasterfile::<u8>(&d8, nd, &geo, &gdir, &proj, &out) {
+///		eprintln!("Error occured while writing {}: {:?}", out.display(), e);
+/// }
+/// ```
+pub fn array_to_rasterfile<T>(
+    data: &Array2<T>,
+    nd: T,                      // nodata
+    geotrans: &[f64; 6],        // geo transform [start_x, psize_x, rotation, starty, rotation, psize_y]
+    geokeydir: &[u64],          // geo dir, it has the crs in it
+    proj: &str,                 // the projection string
+    outfile: &PathBuf
+) -> Result<(), RasterError>
+    where T: bytemuck::Pod + ToString
+{
+    let (nrows, ncols) = (data.nrows(), data.ncols());
+
+    let fh = File::create(outfile)?;
+    let mut encoder = tiff::encoder::TiffEncoder::new(fh)?;
+
+    // Because image doesn't have traits I couldn't figure out how to do this with generics
+    // This macro takes the tiff colortype
+    macro_rules! writit {
+        ($pix:ty) => {{
+            let mut image = encoder.new_image_with_compression::<$pix, Deflate>(ncols as u32, nrows as u32, Deflate::default())?;
+            image.encoder().write_tag(Tag::GdalNodata, &nd.to_string()[..])?;
+            image.encoder().write_tag(Tag::ModelPixelScaleTag, &[geotrans[1], geotrans[5], 0.0][..])?;
+            image.encoder().write_tag(Tag::ModelTiepointTag, &[0.0, 0.0, 0.0, geotrans[0], geotrans[3], 0.0][..])?;
+            image.encoder().write_tag(Tag::GeoKeyDirectoryTag, geokeydir)?;
+            image.encoder().write_tag(Tag::GeoAsciiParamsTag, &proj)?;
+            image.write_data(cast_slice(data.as_slice().unwrap()))?;
+        }};
+    }
+
+    match std::any::TypeId::of::<T>() {
+        id if id == std::any::TypeId::of::<u8>()  => writit!(Gray8),
+        id if id == std::any::TypeId::of::<u16>() => writit!(Gray16),
+        id if id == std::any::TypeId::of::<u32>() => writit!(Gray32),
+        id if id == std::any::TypeId::of::<u64>() => writit!(Gray64),
+        id if id == std::any::TypeId::of::<f32>() => writit!(Gray32Float),
+        id if id == std::any::TypeId::of::<f64>() => writit!(Gray64Float),
+        id if id == std::any::TypeId::of::<i8>()  => writit!(GrayI8),
+        id if id == std::any::TypeId::of::<i16>() => writit!(GrayI16),
+        id if id == std::any::TypeId::of::<i32>() => writit!(GrayI32),
+        id if id == std::any::TypeId::of::<i64>() => writit!(GrayI64),
+        _ => return Err(RasterError::UnsupportedType(format!("Cannot handle type {}", std::any::type_name::<T>())))
+    };
+
+    Ok(())
+}
 
 
 #[derive(PartialEq, Debug)]
@@ -404,19 +623,19 @@ pub fn fill_depressions(
 /// [whitebox d8_pointer](https://github.com/jblindsay/whitebox-tools/blob/master/whitebox-tools-app/src/tools/hydro_analysis/d8_pointer.rs)
 ///
 /// This function computes the D8 flow direction for each cell in the provided DEM:
-///                                                                                                          
-/// | .  |  .  |  . |                                                                                        
-/// |:--:|:---:|:--:|                                                                                        
-/// | 64 | 128 | 1  |                                                                                        
-/// | 32 |  0  | 2  |                                                                                        
-/// | 16 |  8  | 4  |                                                                                        
+///
+/// | .  |  .  |  . |
+/// |:--:|:---:|:--:|
+/// | 64 | 128 | 1  |
+/// | 32 |  0  | 2  |
+/// | 16 |  8  | 4  |
 ///
 /// Grid cells that have no lower neighbours are assigned a flow direction of zero. In a DEM that
 /// has been pre-processed to remove all depressions and flat areas, this condition will only occur
 /// along the edges of the grid.
-///                                                                                                                                                                                                                  
+///
 /// Grid cells possessing the NoData value in the input DEM are assigned the NoData value in the
-/// output image.                                                                                                       
+/// output image.
 ///
 /// # Parameters
 /// - `dem`: A 2D array representing the digital elevation model (DEM)
