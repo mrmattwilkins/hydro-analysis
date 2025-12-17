@@ -340,10 +340,12 @@ pub fn fill_depressions(
         1.0_f64 / elev_multiplier as f64 * diagres.ceil()
     };
 
+    //let input = dem.clone();    // original whitebox used an input and output while doing fixing flats, don't think you really need it
+
     let dx = [1, 1, 1, 0, -1, -1, -1, 0];
     let dy = [-1, 0, 1, 1, 1, 0, -1, -1];
 
-    // Find pit cells. This step is parallelizable.
+    // Find pit cells (we don't care about pits around edge, they won't be considered a pit). This step is parallelizable.
 	let mut pits: Vec<_> = (1..rows - 1)
 		.into_par_iter()
 		.flat_map(|row| {
@@ -406,9 +408,14 @@ pub fn fill_depressions(
                 }
                 if !outlet_found {
                     for n in 0..8 {
-                        let cn: usize = (cell2.column as isize + dx[n]) as usize;
-                        let rn: usize = (cell2.row as isize + dy[n]) as usize;
-                        if rn < rows && cn < columns && visited[[rn, cn]] == 0 {
+                        let cn = cell2.column as isize + dx[n];
+                        let rn = cell2.row as isize + dy[n];
+                        if rn < 0 || rn as usize >= rows || cn < 0 || cn as usize >= columns {
+                            continue;
+                        }
+                        let cn = cn as usize;
+                        let rn = rn as usize;
+                        if visited[[rn, cn]] == 0 {
                             let zn = dem[[rn, cn]];
                             if !outlet_found {
                                 if zn >= z && zn != nodata {
@@ -443,9 +450,14 @@ pub fn fill_depressions(
                     if z == outlet_z {
                         let mut anoutlet = false;
                         for n in 0..8 {
-                            let cn: usize = (cell2.column as isize + dx[n]) as usize;
-                            let rn: usize = (cell2.row as isize + dy[n]) as usize;
-                            if rn < rows && cn < columns && visited[[rn, cn]] == 0 {
+                            let cn = cell2.column as isize + dx[n];
+                            let rn = cell2.row as isize + dy[n];
+                            if rn < 0 || rn as usize >= rows || cn < 0 || cn as usize >= columns {
+                                continue;
+                            }
+                            let cn = cn as usize;
+                            let rn = rn as usize;
+                            if visited[[rn, cn]] == 0 {
                                 let zn = dem[[rn, cn]];
                                 if zn < z {
                                     anoutlet = true;
@@ -474,9 +486,14 @@ pub fn fill_depressions(
                 // Start from the outlets.
                 while let Some(cell2) = queue.pop_front() {
                     for n in 0..8 {
-                        let rn: usize = (cell2.0 as isize + dy[n]) as usize;
-                        let cn: usize = (cell2.1 as isize + dx[n]) as usize;
-                        if rn < rows && cn < columns && visited[[rn, cn]] == 1 {
+                        let cn = cell2.1 as isize + dx[n];
+                        let rn = cell2.0 as isize + dy[n];
+                        if rn < 0 || rn as usize >= rows || cn < 0 || cn as usize >= columns {
+                            continue;
+                        }
+                        let cn = cn as usize;
+                        let rn = rn as usize;
+                        if visited[[rn, cn]] == 1 {
                             visited[[rn, cn]] = 0;
                             queue.push_back((rn, cn));
                             let z = dem[[rn, cn]];
@@ -493,8 +510,13 @@ pub fn fill_depressions(
                 queue.push_back((row, col)); // start at the pit cell and clean up visited
                 while let Some(cell2) = queue.pop_front() {
                     for n in 0..8 {
-                        let rn: usize = (cell2.0 as isize + dy[n]) as usize;
-                        let cn: usize = (cell2.1 as isize + dx[n]) as usize;
+                        let cn = cell2.1 as isize + dx[n];
+                        let rn = cell2.0 as isize + dy[n];
+                        if rn < 0 || rn as usize >= rows || cn < 0 || cn as usize >= columns {
+                            continue;
+                        }
+                        let cn = cn as usize;
+                        let rn = rn as usize;
                         if visited[[rn, cn]] == 1 {
                             visited[[rn, cn]] = 0;
                             queue.push_back((rn, cn));
@@ -508,11 +530,6 @@ pub fn fill_depressions(
 
     drop(visited);
 
-    //let (mut col, mut row): (isize, isize);
-    //let (mut rn, mut cn): (isize, isize);
-    //let (mut z, mut zn): (f64, f64);
-    //let mut flag: bool;
-
     if small_num > 0.0 && fix_flats {
         // Some of the potential outlets really will have lower cells.
         minheap.clear();
@@ -520,12 +537,12 @@ pub fn fill_depressions(
             let z = dem[[cell.0, cell.1]];
             let mut anoutlet = false;
             for n in 0..8 {
-                let rn: usize = (cell.0 as isize + dy[n]) as usize;
-                let cn: usize = (cell.1 as isize + dx[n]) as usize;
-                if rn >= rows || cn >= columns {
-                    break;
+                let rn: isize = cell.0 as isize + dy[n];
+                let cn: isize = cell.1 as isize + dx[n];
+                if rn < 0 || rn as usize >= rows || cn < 0 || cn as usize >= columns {
+                    continue;
                 }
-                let zn = dem[[rn, cn]];
+                let zn = dem[[rn as usize, cn as usize]];
                 if zn < z && zn != nodata {
                     anoutlet = true;
                     break;
@@ -573,16 +590,21 @@ pub fn fill_depressions(
                 for cell2 in &outlets {
                     let z = dem[[cell2.row, cell2.column]];
                     for n in 0..8 {
-                        let cn: usize = (cell2.column as isize + dx[n]) as usize;
-                        let rn: usize = (cell2.row as isize + dy[n]) as usize;
-                        if rn < rows && cn < columns && flats[[rn, cn]] != 3 {
+                        let cn = cell2.column as isize + dx[n];
+                        let rn = cell2.row as isize + dy[n];
+                        if rn < 0 || rn as usize >= rows || cn < 0 || cn as usize >= columns {
+                            continue;
+                        }
+                        let cn = cn as usize;
+                        let rn = rn as usize;
+                        if flats[[rn, cn]] != 3 {
                             let zn = dem[[rn, cn]];
                             if zn == z && zn != nodata {
                                 minheap2.push(GridCell2 {
                                     row: rn,
                                     column: cn,
                                     z: z,
-                                    priority: dem[[rn, cn]],
+                                    priority: dem[[rn, cn]], // FIXME
                                 });
                                 dem[[rn, cn]] = z + small_num;
                                 flats[[rn, cn]] = 3;
@@ -590,20 +612,26 @@ pub fn fill_depressions(
                         }
                     }
                 }
+
                 // Now fix the flats
                 while let Some(cell2) = minheap2.pop() {
                     let z = dem[[cell2.row, cell2.column]];
                     for n in 0..8 {
-                        let cn: usize = (cell2.column as isize + dx[n]) as usize;
-                        let rn: usize = (cell2.row as isize + dy[n]) as usize;
-                        if rn < rows && cn < columns && flats[[rn, cn]] != 3 {
+                        let cn = cell2.column as isize + dx[n];
+                        let rn = cell2.row as isize + dy[n];
+                        if rn < 0 || rn as usize >= rows || cn < 0 || cn as usize >= columns {
+                            continue;
+                        }
+                        let cn = cn as usize;
+                        let rn = rn as usize;
+                        if flats[[rn, cn]] != 3 {
                             let zn = dem[[rn, cn]];
                             if zn < z + small_num && zn >= cell2.z && zn != nodata {
                                 minheap2.push(GridCell2 {
                                     row: rn,
                                     column: cn,
                                     z: cell2.z,
-                                    priority: dem[[rn, cn]],
+                                    priority: dem[[rn, cn]], // FIXME
                                 });
                                 dem[[rn, cn]] = z + small_num;
                                 flats[[rn, cn]] = 3;
