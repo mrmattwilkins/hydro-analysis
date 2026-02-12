@@ -8,35 +8,6 @@
 //! command line tool, this provides functionality via functions so can be called
 //! from your code.
 //!
-//! ## Example of reading and writing rasters                                                         
-//!                                                                                                   
-//! ```                                                                                               
-//! let ifn = PathBuf::from("input.tif");                                                             
-//! let (d8, nd, crs, geo, gdir, proj) = rasterfile_to_array::<u8>(&ifn)?;                            
-//! /* do something with d8, or make a new array2 */                                                  
-//! let ofn = PathBuf::from("output.tif");                                                            
-//! if let Err(e) = array_to_rasterfile::<u8>(&d8, nd, &geo, &gdir, &proj, &ofn) {                    
-//!     eprintln!("Error occured while writing {}: {:?}", ofn.display(), e);                          
-//! }                                                                                                 
-//! ```                                                                                               
-//!                                                                                                   
-//! ## Example of filling and d8                                                                      
-//!
-//! ```
-//! use ndarray::Array2;
-//! use hydro_analysis::{fill_depressions, d8_pointer};
-//!
-//! let mut dem = Array2::from_shape_vec(
-//!     (3, 3),
-//!     vec![
-//!         10.0, 12.0, 10.0,
-//!         12.0, 9.0,  12.0,
-//!         10.0, 12.0, 10.0,
-//!     ],
-//! ).expect("Failed to create DEM");
-//!
-//! fill_depressions(&mut dem, -3.0, 8.0, 8.0, true);
-//! let (d8, d8_nd) = d8_pointer(&dem, -1.0, 8.0, 8.0);
 //! ```
 
 use rayon::prelude::*;
@@ -87,23 +58,20 @@ pub enum RasterError {
 ///
 /// # Returns
 /// A `Result` with a tuple containing:
-///     - `Array2<T>`: The raster data in a 2D array.
-///     - `T`: nodata
-///     - `u16`: CRS (e.g. 2193)
-///     - `[f64; 6]`: The affine GeoTransform in the format:
-///         `[origin_x, pixel_size_x, rotation_x, origin_y, rotation_y, pixel_size_y]`.
-///     - `Vec<u64>`: raw GeoKeyDirectoryTag values (needed for writing to file)
-///     - `String`: PROJ string (needed for writing to file)
+///  - `Array2<T>`: The raster data in a 2D array.
+///  - `T`: nodata
+///  - `u16`: CRS (e.g. 2193)
+///  - `[f64; 6]`: The affine GeoTransform in the format:
+///   `[origin_x, pixel_size_x, rotation_x, origin_y, rotation_y, pixel_size_y]`.
+///  - `Vec<u64>`: raw GeoKeyDirectoryTag values (needed for writing to file)
+///  - `String`: PROJ string (needed for writing to file)
 ///
 /// # Errors
-///     - Returns `RasterError` variants if reading fails, the type conversion for data or metadata
-///       fails, or required tags are missing from the TIFF file.
+///  - Returns `RasterError` variants if reading fails, the type conversion for data or metadata
+///   fails, or required tags are missing from the TIFF file.
 ///
 /// # Example
-/// ```
-/// let path = PathBuf::from("input.tif");
-/// let (d8, nd, crs, geo, gdir, proj) = rasterfile_to_array::<u8>(&path)?;
-/// ```
+///   See [examples/reading_and_writing_rasters.rs](examples/reading_and_writing_rasters.rs)
 pub fn rasterfile_to_array<T>(fname: &PathBuf) -> Result<
     (
         Array2<T>,
@@ -117,9 +85,7 @@ pub fn rasterfile_to_array<T>(fname: &PathBuf) -> Result<
 >
     where T: std::str::FromStr + num::FromPrimitive,
           <T as std::str::FromStr>::Err: std::fmt::Debug,
-          RasterError: std::convert::From<<T as std::str::FromStr>::Err>
-{
-    // Open the file
+          RasterError: std::convert::From<<T as std::str::FromStr>::Err> { // Open the file
     let file = File::open(fname)?;
 
     // Create a TIFF decoder
@@ -158,7 +124,7 @@ pub fn rasterfile_to_array<T>(fname: &PathBuf) -> Result<
     let tie: Vec<f64>  = decoder.get_tag_f64_vec(Tag::ModelTiepointTag)?.into_iter().collect();
 
     // transform, the zeros are the rotations [start x, x pixel size, 0, start y, 0, y pixel size]
-    let geotrans: [f64; 6] = [tie[3], pscale[0], 0.0, tie[4], 0.0, -pscale[1]];
+    let geotrans: [f64; 6] = [tie[3], pscale[0], 0.0, tie[4], 0.0, pscale[1]];
 
     let projection: String = decoder.get_tag_ascii_string(Tag::GeoAsciiParamsTag)?;
     let geokeydir: Vec<u64> = decoder .get_tag_u64_vec(Tag::GeoKeyDirectoryTag)?;
@@ -178,13 +144,13 @@ pub fn rasterfile_to_array<T>(fname: &PathBuf) -> Result<
 /// metadata).
 ///
 /// # Parameters
-/// 	- `data`: A 2D array (`ndarray::Array2<T>`) containing raster pixel values.
-/// 	- `nd`: NoData value
-/// 	- `geotrans`: A 6-element array defining the affine geotransform:
-/// 	    `[origin_x, pixel_size_x, rotation_x, origin_y, rotation_y, pixel_size_y]`.
-/// 	- `geokeydir`: &[u64] the GeoKeyDirectoryTag (best got from reading a raster)
-/// 	- `proj`: PROJ string (best got from reading a raster)
-/// 	- `outfile`: The path to the output `.tif` file.
+/// `data`: A 2D array (`ndarray::Array2<T>`) containing raster pixel values.
+/// `nd`: NoData value
+/// `geotrans`: A 6-element array defining the affine geotransform:
+///   `[origin_x, pixel_size_x, rotation_x, origin_y, rotation_y, pixel_size_y]`.
+/// `geokeydir`: &[u64] the GeoKeyDirectoryTag (best got from reading a raster)
+/// `proj`: PROJ string (best got from reading a raster)
+/// `outfile`: The path to the output `.tif` file.
 ///
 /// # Returns
 /// Ok() or a `RasterError`
@@ -194,15 +160,7 @@ pub fn rasterfile_to_array<T>(fname: &PathBuf) -> Result<
 /// - Propagates I/O and TIFF writing errors
 ///
 /// # Example
-/// ```
-/// let path = PathBuf::from("input.tif");
-/// let (d8, nd, crs, geo, gdir, proj) = rasterfile_to_array::<u8>(&path)?;
-/// /* do something with d8, or make a new array2 */
-/// let out = PathBuf::from("output.tif");
-/// if let Err(e) = array_to_rasterfile::<u8>(&d8, nd, &geo, &gdir, &proj, &out) {
-///		eprintln!("Error occured while writing {}: {:?}", out.display(), e);
-/// }
-/// ```
+///   See [examples/reading_and_writing_rasters.rs](examples/reading_and_writing_rasters.rs)
 pub fn array_to_rasterfile<T>(
     data: &Array2<T>,
     nd: T,                      // nodata
@@ -314,19 +272,35 @@ impl Ord for GridCell2 {
 /// # Example
 ///
 /// ```
-/// use ndarray::Array2;
+/// use ndarray::{array, Array2};
 /// use hydro_analysis::fill_depressions;
 ///
-/// let mut dem = Array2::from_shape_vec(
-///     (3, 3),
-///     vec![
-///         10.0, 12.0, 10.0,
-///         12.0, 9.0,  12.0,
-///         10.0, 12.0, 10.0,
-///     ],
-/// ).expect("Failed to create DEM");
-///
+/// let mut dem: Array2<f64> = array![
+///         [10.0, 12.0, 10.0],
+///         [12.0, 1.0, 12.0],
+///         [10.0, 12.0, 10.0],
+/// ];
+/// let filled: Array2<f64> = array![
+///         [10.0, 12.0, 10.0],
+///         [12.0, 1.0, 12.0],
+///         [10.0, 12.0, 10.0],
+/// ];
 /// fill_depressions(&mut dem, -3.0, 8.0, 8.0, true);
+/// assert_eq!(dem, filled);
+/// let mut dem: Array2<f64> = array![
+///         [10.0, 12.0, 10.0, 10.0],
+///         [12.0, 1.0, 10.0, 12.0],
+///         [10.0, 12.0, 10.0, 9.0],
+/// ];
+/// let filled: Array2<f64> = array![
+///         [10.0, 12.0, 10.0, 10.0],
+///         [12.0, 10.0, 10.0, 12.0],
+///         [10.0, 12.0, 10.0, 9.0],
+/// ];
+/// fill_depressions(&mut dem, -3.0, 8.0, 8.0, true);
+/// for (x, y) in dem.iter().zip(filled.iter()) {
+///    assert!((*x - *y).abs() < 1e-4);
+/// }
 /// ```
 pub fn fill_depressions(
     dem: &mut Array2<f64>, nodata: f64, resx: f64, resy: f64, fix_flats: bool
@@ -388,6 +362,7 @@ pub fn fill_depressions(
 
         // if it's already in a solved site, don't do it a second time.
         if flats[[row, col]] != 1 {
+        
             // First there is a priority region-growing operation to find the outlets.
             minheap.clear();
             minheap.push(GridCell {
@@ -402,6 +377,7 @@ pub fn fill_depressions(
                 queue.clear();
             }
             while let Some(cell2) = minheap.pop() {
+
                 let z = cell2.priority;
                 if outlet_found && z > outlet_z {
                     break;
@@ -673,23 +649,32 @@ pub fn fill_depressions(
 ///
 /// # Returns
 /// - A tuple containing:
-///     - An `Array2<u8>` representing the D8 flow directions for each cell.
-///     - A `u8` nodata value (255)
+/// - An `Array2<u8>` representing the D8 flow directions for each cell.
+/// - A `u8` nodata value (255)
 ///
 /// # Example
 /// ```rust
+/// use anyhow::Result;
+/// use ndarray::{Array2, array};
+/// use hydro_analysis::{d8_pointer};
 /// let dem = Array2::from_shape_vec(
 ///     (3, 3),
 ///     vec![
-///         10.0, 12.0, 10.0,
+///         11.0, 12.0, 10.0,
 ///         12.0, 13.0, 12.0,
-///         10.0, 12.0, 10.0,
+///         10.5, 12.0, 11.0,
 ///     ],
 /// ).expect("Failed to create DEM");
+/// let d8: Array2<u8> = array![
+///     [0, 2, 0],
+///     [8, 1, 128],
+///     [0, 32, 0],
+/// ];
 /// let nodata = -9999.0;
 /// let resx = 8.0;
 /// let resy = 8.0;
-/// let (d8, nd) = d8_pointer(&dem, nodata, resx, resy);
+/// let (res, _nd) = d8_pointer(&dem, nodata, resx, resy);
+/// assert_eq!(res, d8);
 /// ```
 pub fn d8_pointer(dem: &Array2<f64>, nodata: f64, resx: f64, resy: f64) -> (Array2<u8>, u8)
 {
