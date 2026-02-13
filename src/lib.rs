@@ -11,9 +11,10 @@
 //! ```
 
 use rayon::prelude::*;
-use std::collections::{BinaryHeap, VecDeque};
+use std::collections::{HashMap, BinaryHeap, VecDeque};
 use std::cmp::Ordering;
 use std::cmp::Ordering::Equal;
+use std::collections::hash_map::Entry::Vacant;
 use ndarray::Array2;
 
 use std::{fs::File, f64, path::PathBuf};
@@ -118,13 +119,14 @@ pub fn rasterfile_to_array<T>(fname: &PathBuf) -> Result<
     let nodata: T = decoder.get_tag_ascii_string(Tag::GdalNodata)?.trim().parse::<T>()?;
 
     // pixel scale [pixel scale x, pixel scale y, ...]
+    // NB pixel scale y is the absolute value, it is POSITIVE.  We have to make it negative later
     let pscale: Vec<f64> = decoder.get_tag_f64_vec(Tag::ModelPixelScaleTag)?.into_iter().collect();
 
     // tie point [0 0 0 startx starty 0]
     let tie: Vec<f64>  = decoder.get_tag_f64_vec(Tag::ModelTiepointTag)?.into_iter().collect();
 
     // transform, the zeros are the rotations [start x, x pixel size, 0, start y, 0, y pixel size]
-    let geotrans: [f64; 6] = [tie[3], pscale[0], 0.0, tie[4], 0.0, pscale[1]];
+    let geotrans: [f64; 6] = [tie[3], pscale[0], 0.0, tie[4], 0.0, -pscale[1]];
 
     let projection: String = decoder.get_tag_ascii_string(Tag::GeoAsciiParamsTag)?;
     let geokeydir: Vec<u64> = decoder .get_tag_u64_vec(Tag::GeoKeyDirectoryTag)?;
@@ -182,7 +184,8 @@ pub fn array_to_rasterfile<T>(
         ($pix:ty) => {{
             let mut image = encoder.new_image_with_compression::<$pix, Deflate>(ncols as u32, nrows as u32, Deflate::default())?;
             image.encoder().write_tag(Tag::GdalNodata, &nd.to_string()[..])?;
-            image.encoder().write_tag(Tag::ModelPixelScaleTag, &[geotrans[1], geotrans[5], 0.0][..])?;
+            // remember that geotrans is negative, but in tiff tags assumed to be positive
+            image.encoder().write_tag(Tag::ModelPixelScaleTag, &[geotrans[1], -geotrans[5], 0.0][..])?;
             image.encoder().write_tag(Tag::ModelTiepointTag, &[0.0, 0.0, 0.0, geotrans[0], geotrans[3], 0.0][..])?;
             image.encoder().write_tag(Tag::GeoKeyDirectoryTag, geokeydir)?;
             image.encoder().write_tag(Tag::GeoAsciiParamsTag, &proj)?;
@@ -362,7 +365,7 @@ pub fn fill_depressions(
 
         // if it's already in a solved site, don't do it a second time.
         if flats[[row, col]] != 1 {
-        
+
             // First there is a priority region-growing operation to find the outlets.
             minheap.clear();
             minheap.push(GridCell {
@@ -727,4 +730,233 @@ pub fn d8_pointer(dem: &Array2<f64>, nodata: f64, resx: f64, resy: f64) -> (Arra
     return (d8, out_nodata);
 }
 
+/// Breach depressions least cost.  Implements
+///
+/// [whitebox breach_depressions_least_cost](https://github.com/jblindsay/whitebox-tools/blob/master/whitebox-tools-app/src/tools/hydro_analysis/breach_depressions_least_cost.rs)
+///
+/// with
+///   max_cost set to infinity,
+///   flat_increment is default, and
+///   minimize_dist set to true.
+///
+/// with more modern and less memory intensive datastructures.
+///
+/// The only real parameter to tune is max_dist (measured in cells) and a default would be 20
+///
+/// # Returns
+///  number of pits that remain
+///
+/// # Examples
+///
+/// See tests/breach_depressions.rs for lots of examples, here is just one
+///
+/// ```rust
+/// use ndarray::{Array2, array};
+/// use hydro_analysis::breach_depressions;
+/// let resx = 8.0;
+/// let resy = 8.0;
+/// let max_dist = 100;
+/// let ep = 0.00000012;
+/// let mut dem: Array2<f64> = array![
+///     [2.0, 2.0, 2.0, 2.0, 0.0],
+///     [2.0, 1.0, 2.0, 0.5, 0.0],
+///     [2.0, 2.0, 2.0, 2.0, 0.0],
+/// ];
+/// let breached: Array2<f64> = array![
+///     [2.0, 2.0, 2.0, 2.0, 0.0],
+///     [2.0, 2.0-ep, 2.0-2.0*ep, 0.5, 0.0],
+///     [2.0, 2.0, 2.0, 2.0, 0.0],
+/// ];
+/// let n = breach_depressions(&mut dem, -1.0, resx, resy, max_dist);
+/// assert_eq!(n, 0);
+/// for (x, y) in dem.iter().zip(breached.iter()) {
+///    assert!((*x - *y).abs() < 1e-10);
+/// }
+///
+pub fn breach_depressions(dem: &mut Array2<f64>, nodata: f64, resx: f64, resy: f64, max_dist: usize) -> usize
+{
+
+    let diagres: f64 = (resx * resx + resy * resy).sqrt();
+    let cost_dist = [diagres, resx, diagres, resy, diagres, resx, diagres, resy];
+
+    let (nrows, ncols) = (dem.nrows(), dem.ncols());
+    let small_num = {
+        let diagres = (resx * resx + resy * resy).sqrt();
+        let elev_digits = (dem.iter().cloned().fold(f64::NEG_INFINITY, f64::max) as i64).to_string().len();
+        let elev_multiplier = 10.0_f64.powi((9 - elev_digits) as i32);
+        1.0_f64 / elev_multiplier as f64 * diagres.ceil()
+    };
+
+    // want to raise interior (ie not on boundary or with a nodata neighbour) pit cells up to
+    // just below minimum neighbour height.
+    //
+    // so first find the pits
+    let dx = [1, 1, 1, 0, -1, -1, -1, 0];
+    let dy = [-1, 0, 1, 1, 1, 0, -1, -1];
+	let mut pits: Vec<_> = (1..nrows - 1).into_par_iter().flat_map(|row| {
+        let mut local_pits = Vec::new();
+        for col in 1..ncols - 1 {
+            let z = dem[[row, col]];
+            if z == nodata {
+                continue;
+            }
+            let mut apit = true;
+            // is any neighbour lower than me or nodata?
+            for n in 0..8 {
+                let zn = dem[[(row as isize + dy[n]) as usize, (col as isize + dx[n]) as usize]];
+                if zn < z || zn == nodata {
+                    apit = false;
+                    break;
+                }
+            }
+            // no, so I am a pit
+            if apit {
+                local_pits.push((row, col, z));
+            }
+        }
+        local_pits
+    }).collect();
+
+    // set depth to just below min neighbour, can't do this in parallel, we update the dem and pits
+    for &mut (row, col, ref mut z) in pits.iter_mut() {
+        let min_zn: f64 = dx.iter().zip(&dy).map(|(&dxi, &dyi)|
+            dem[[
+                (row as isize + dyi) as usize,
+                (col as isize + dxi) as usize,
+            ]]
+        ).fold(f64::INFINITY, f64::min);
+        *z = min_zn - small_num;
+        dem[[row, col]] = *z;
+    }
+
+    // Sort highest to lowest so poping off the end will get the lowest, should do that first
+    // because might solve some higher ones
+    pits.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(Equal));
+
+    // keep track of number we can't deal with to return
+    let mut num_unsolved: usize = 0;
+
+    // roughly how many cells we will have to look at
+    let num_to_chk: usize = (max_dist * 2 + 1) * (max_dist * 2 + 1);
+
+    // for keeping track of path be make
+    #[derive(Debug)]
+    struct NodeInfo {
+        prev: Option<(usize, usize)>,
+        length: usize,
+    }
+
+    // try and dig a channel from row, col
+    while let Some((row, col, z)) = pits.pop() {
+
+        // May have been solved during previous depression step, so can skip
+        if dx.iter().zip(&dy).any(|(&dxi, &dyi)|
+            dem[[(row as isize + dyi) as usize, (col as isize + dxi) as usize]] < z
+        ) {
+            continue;
+        }
+
+        // keep our path info in here
+        let mut visited: HashMap<(usize,usize), NodeInfo> = HashMap::default();
+        visited.insert((row,col), NodeInfo {
+            prev: None,
+            length: 0,
+        });
+
+        // cells we will check to see if lower than (row, col, z)
+        let mut cells_to_chk = BinaryHeap::with_capacity(num_to_chk);
+        cells_to_chk.push(GridCell {row: row, column: col, priority: 0.0 });
+
+        let mut dugit = false;
+        'search: while let Some(GridCell {row: chkrow, column: chkcol, priority: accum}) = cells_to_chk.pop() {
+
+            let length: usize = visited[&(chkrow,chkcol)].length;
+            let zn: f64 = dem[[chkrow, chkcol]];
+            let cost1: f64 = zn - z + length as f64 * small_num;
+            let mut breach: Option<(usize, usize)> = None;
+
+            // lets look about chkrow, chkcol
+            for n in 0..8 {
+                let rn: isize = chkrow as isize + dy[n];
+                let cn: isize = chkcol as isize + dx[n];
+
+                // chkrow, chkcol is a breach if on the edge
+                if rn < 0 || rn >= nrows as isize || cn < 0 || cn >= ncols as isize {
+                    breach = Some((chkrow, chkcol));
+                    // we need to force this boundary cell down
+                    dem[[chkrow, chkcol]] = z - (length as f64 * small_num);
+                    break;
+                }
+                let rn: usize = rn as usize;
+                let cn: usize = cn as usize;
+                let nextlen = length + 1;
+
+                // insert if not visited
+                if let Vacant(e) = visited.entry((rn, cn)) {
+                    e.insert(NodeInfo {
+                        prev: Some((chkrow, chkcol)),
+                        length: nextlen
+                    });
+                } else {
+                    continue;
+                }
+
+                let zn: f64 = dem[[rn, cn]];
+                // an internal nodata cannot be breach point
+                if zn == nodata {
+                    continue;
+                }
+
+                // zout is lowered from z by nextlen * slope
+                let zout: f64 = z - (nextlen as f64 * small_num);
+                if zn <= zout {
+                    breach = Some((rn, cn));
+                    break;
+                }
+
+                // (rn, cn) no good, zn is too high, just push onto heap
+                if zn > zout {
+                    let cost2: f64 = zn - zout;
+                    let new_cost: f64 = accum + (cost1 + cost2) / 2.0 * cost_dist[n];
+                    // but haven't travelled too far, so we will scan from this cell
+                    if nextlen <= max_dist {
+                        cells_to_chk.push(GridCell {
+                            row: rn,
+                            column: cn,
+                            priority: new_cost
+                        });
+                    }
+                }
+            }
+
+            if let Some(mut cur) = breach {
+                loop {
+                    let node: &NodeInfo = &visited[&cur];
+                    // back at the pit?
+                    let Some(parent) = node.prev else {
+                        break;
+                    };
+
+                    let zn = dem[[parent.0, parent.1]];
+                    let length = visited[&parent].length;
+                    let zout = z - (length as f64 * small_num);
+                    if zn > zout {
+                        dem[[parent.0, parent.1]] = zout;
+                    }
+                    cur = parent;
+                }
+                dugit = true;
+                break 'search;
+            }
+
+        }
+
+        if !dugit {
+            // Didn't find any lower cells, tough luck
+            num_unsolved += 1;
+        }
+    }
+
+    num_unsolved
+}
 
