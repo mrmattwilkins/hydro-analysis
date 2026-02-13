@@ -15,7 +15,7 @@ use std::collections::{HashMap, BinaryHeap, VecDeque};
 use std::cmp::Ordering;
 use std::cmp::Ordering::Equal;
 use std::collections::hash_map::Entry::Vacant;
-use ndarray::Array2;
+use ndarray::{Array2, par_azip};
 
 use std::{fs::File, f64, path::PathBuf};
 use thiserror::Error;
@@ -729,6 +729,111 @@ pub fn d8_pointer(dem: &Array2<f64>, nodata: f64, resx: f64, resy: f64) -> (Arra
 
     return (d8, out_nodata);
 }
+
+
+/// Updates a D8 flow direction using a mask that indicates onland and ocean and return changed
+/// flattened indices.
+///
+/// This function will ensure your downstream traces calculated from a D8 will stop at the coast.
+/// Any cell whose direction leads us to the ocean will become a sink.  Any cell in the ocean will
+/// be nodata
+///
+/// An alternative approach (which doesn't work) is to first mask the DEM with nodata and then
+/// calculate the D8.  Unfortunately this results in downstream traces that get to the coast
+/// (nodata) and then head along the coast, sometimes for ages before coming to a natural sink.
+///
+/// # Parameters
+///   d8: A 2D u8 array representing the directions
+///   nodata: The nodata for the d8 (probably 255)
+///   onland: A 2D bool array representing the land
+///
+/// # Returns
+/// nothing, but updates the d8
+///
+/// # Example
+/// ```rust
+/// use ndarray::Array2;
+/// let mut d8 = Array2::from_shape_vec(
+///     (3, 3),
+///     vec![
+///         4, 2, 1,
+///         2, 2, 1,
+///         1, 128, 4,
+///     ],
+/// ).expect("Failed to create D8");
+/// let onland = Array2::from_shape_vec(
+///     (3, 3),
+///     vec![
+///         true, true, false,
+///         true, true, false,
+///         true, true, false,
+///     ],
+/// ).expect("Failed to create onland");
+/// let newd8 = Array2::from_shape_vec(
+///     (3, 3),
+///     vec![
+///         4, 0, 255,
+///         2, 0, 255,
+///         1, 128, 255,
+///     ],
+/// ).expect("Failed to create D8");
+/// let changed = hydro_analysis::d8_clipped(&mut d8, 255, &onland);
+/// assert_eq!(d8, newd8);
+/// assert_eq!(changed, vec![1, 4]);
+/// ```
+pub fn d8_clipped(d8: &mut Array2<u8>, nodata: u8, onland: &Array2<bool>) -> Vec<usize>
+{
+    let (nrows, ncols) = (d8.nrows(), d8.ncols());
+
+    // in the ocean is nodata
+    par_azip!((d in &mut *d8, m in onland){ if !m { *d = nodata } });
+
+    // so we can index using 1D 
+    let slice = d8.as_slice().unwrap();
+
+    let tozero: Vec<usize> = (0..nrows).into_par_iter().flat_map(|r| {
+        let mut local: Vec<usize> = Vec::new();
+        for c in 0..ncols {
+            let idx = r*ncols + c;
+            if slice[idx] == nodata || slice[idx] == 0 {
+                continue;
+            }
+
+            // get next cell downstream
+            let (dr, dc) = match slice[idx] {
+                1   => (-1,  1),
+                2   => ( 0,  1),
+                4   => ( 1,  1),
+                8   => ( 1,  0),
+                16  => ( 1, -1),
+                32  => ( 0, -1),
+                64  => (-1, -1),
+                128 => (-1,  0),
+                _ => unreachable!(),
+            };
+            let rn = r as isize + dr;
+            let cn = c as isize + dc;
+
+            // if next is outside, don't change idx
+            if rn < 0 || rn >= nrows as isize || cn < 0 || cn >= ncols as isize {
+                continue;
+            }
+            // next is inside and nodata, then set idx to a sink
+            if d8[[rn as usize, cn as usize]] == nodata {
+                local.push(idx);
+            }
+        }
+        local
+    }).collect();
+
+    let slice = d8.as_slice_mut().unwrap();
+    for idx in &tozero {
+        slice[*idx] = 0;
+    }
+
+    tozero
+}
+
 
 /// Breach depressions least cost.  Implements
 ///
