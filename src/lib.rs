@@ -748,7 +748,7 @@ pub fn d8_pointer(dem: &Array2<f64>, nodata: f64, resx: f64, resy: f64) -> (Arra
 ///   onland: A 2D bool array representing the land
 ///
 /// # Returns
-/// nothing, but updates the d8
+/// changed flattend indices
 ///
 /// # Example
 /// ```rust
@@ -921,7 +921,7 @@ pub fn breach_depressions(dem: &mut Array2<f64>, nodata: f64, resx: f64, resy: f
         }
         local_pits
     }).collect();
-
+    
     // set depth to just below min neighbour, can't do this in parallel, we update the dem and pits
     for &mut (row, col, ref mut z) in pits.iter_mut() {
         let min_zn: f64 = dx.iter().zip(&dy).map(|(&dxi, &dyi)|
@@ -953,7 +953,7 @@ pub fn breach_depressions(dem: &mut Array2<f64>, nodata: f64, resx: f64, resy: f
 
     // try and dig a channel from row, col
     while let Some((row, col, z)) = pits.pop() {
-
+        
         // May have been solved during previous depression step, so can skip
         if dx.iter().zip(&dy).any(|(&dxi, &dyi)|
             dem[[(row as isize + dyi) as usize, (col as isize + dxi) as usize]] < z
